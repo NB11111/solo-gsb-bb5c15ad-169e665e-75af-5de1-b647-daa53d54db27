@@ -159,6 +159,21 @@
   .ls-relation.warning { border-left: 4px solid #d9a413; }
   .ls-relation.undetermined { border-left: 4px solid var(--muted); }
   .ls-relation .mono { font-size: 12px; }
+  .pkg-check { margin: 0 4px 0 0; }
+  .dm-entry-list { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+  .dm-entry {
+    display: inline-flex; align-items: center; gap: 6px;
+    border: 1px solid var(--line); border-radius: 7px; padding: 5px 10px;
+    cursor: pointer; background: #fcfdff; font-size: 12px;
+  }
+  .dm-attribution {
+    border: 1px solid var(--line); border-radius: 6px; padding: 5px 9px; margin-bottom: 5px;
+    background: #f8fafc;
+  }
+  .dm-attribution .mono { font-size: 12px; }
+  .dm-attribution .path { margin-top: 4px; padding: 6px 8px; }
+  .badge.dm-incomplete { background: var(--warn-bg); color: var(--warn); }
+  .badge.dm-complete { background: var(--ok-bg); color: var(--ok); }
 </style>
 </head>
 <body>
@@ -353,6 +368,26 @@
       <h2>10. 告警与未解析依赖</h2>
       <div id="warnings"></div>
     </div>
+  </section>
+
+  <section class="card">
+    <h2>11. 交付清单（随入口交付的包闭包） <span class="pill">只读 · 不创建审计 · 不改写审计</span></h2>
+    <div id="delivery-alert" class="alert"></div>
+    <div class="row">
+      <select id="delivery-audit"></select>
+      <button id="btn-delivery">生成交付清单</button>
+      <button class="secondary" id="btn-delivery-download" disabled>⬇ 下载清单 JSON</button>
+    </div>
+    <div class="hint" style="margin-top:8px;">
+      选择一条已保存审计并勾选<b>一个或多个交付入口包</b>后，服务端沿 <b>使用方 → 被依赖方</b>
+      的边计算随入口交付的<b>包闭包</b>（含入口自身）：同一包被多个入口共享时清单<b>只列一次</b>，
+      但保留<b>每个入口到它的最短路径与入口归属</b>；依赖环安全处理、稳定终止，输出顺序固定可复现。
+      入口可达的<b>未解析依赖</b>与闭包内<b>未知许可证</b>的包单列为<b>待补充项</b>
+      （此时清单标记为「不完整」，不能当作完整交付清单）。计算只读复用现有审计，
+      不会创建审计、不改写审计结果与复核标记。
+    </div>
+    <div id="delivery-entries" style="margin-top:12px;"></div>
+    <div id="delivery-result" class="hidden-block" style="margin-top:18px;"></div>
   </section>
 </main>
 
@@ -803,7 +838,7 @@ async function loadAuditList() {
     showCompareAlert(e.message);
     return [];
   }
-  const prev = { base: $("cmp-base").value, target: $("cmp-target").value, retire: $("retire-audit").value, relicense: $("relicense-audit").value, edgefix: $("edgefix-audit").value, repro: $("repro-audit").value, graphselect: $("graphselect-audit").value };
+  const prev = { base: $("cmp-base").value, target: $("cmp-target").value, retire: $("retire-audit").value, relicense: $("relicense-audit").value, edgefix: $("edgefix-audit").value, repro: $("repro-audit").value, graphselect: $("graphselect-audit").value, delivery: $("delivery-audit").value };
   const fill = (sel, selected) => {
     sel.innerHTML = "";
     const placeholder = document.createElement("option");
@@ -825,6 +860,7 @@ async function loadAuditList() {
   fill($("edgefix-audit"), prev.edgefix || (items.length ? String(items[0].id) : ""));
   fill($("repro-audit"), prev.repro || (items.length ? String(items[0].id) : ""));
   fill($("graphselect-audit"), prev.graphselect || (items.length ? String(items[0].id) : ""));
+  fill($("delivery-audit"), prev.delivery || (items.length ? String(items[0].id) : ""));
   // 首次加载默认选最新两条（列表为倒序：items[0] 最新）
   if (!prev.base && items.length) $("cmp-base").value = String(items[0].id);
   // 退役预演的根包列表随审计选择联动加载
@@ -855,6 +891,16 @@ async function loadAuditList() {
     $("edgefix-target").innerHTML = "";
     $("edgefix-result").className = "hidden-block";
     $("btn-edgefix").disabled = true;
+  }
+  // 交付清单的可选入口列表随审计选择联动加载
+  if ($("delivery-audit").value) {
+    await loadDeliveryPreview();
+  } else {
+    deliveryEntries = [];
+    $("delivery-entries").innerHTML = "";
+    $("delivery-result").className = "hidden-block";
+    $("btn-delivery").disabled = true;
+    $("btn-delivery-download").disabled = true;
   }
   return items;
 }
@@ -1665,6 +1711,193 @@ $("btn-graphselect").addEventListener("click", async () => {
   } finally {
     $("btn-graphselect").disabled = false;
   }
+});
+
+// --- 交付清单（随入口交付的包闭包，只读） ---------------------------------------
+
+let deliveryEntries = [];   // 当前选中审计的可选入口包（预览接口返回）
+let deliveryReport = null;  // 最近一次生成的清单报告（供下载复用同一选择）
+
+function showDeliveryAlert(msg) {
+  const el = $("delivery-alert");
+  el.textContent = msg;
+  el.className = "alert error show";
+}
+function clearDeliveryAlert() { $("delivery-alert").className = "alert"; }
+
+async function loadDeliveryPreview() {
+  clearDeliveryAlert();
+  const aid = $("delivery-audit").value;
+  $("delivery-result").className = "hidden-block";
+  $("delivery-result").innerHTML = "";
+  deliveryReport = null;
+  $("btn-delivery-download").disabled = true;
+  const box = $("delivery-entries");
+  box.innerHTML = "";
+  if (!aid) { $("btn-delivery").disabled = true; return; }
+  let data;
+  try {
+    const resp = await fetch("/api/audits/" + aid + "/delivery-manifest");
+    data = await resp.json();
+    if (!resp.ok) throw new Error(typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail));
+  } catch (e) {
+    showDeliveryAlert("加载交付入口列表失败：" + e.message);
+    $("btn-delivery").disabled = true;
+    return;
+  }
+  deliveryEntries = data.entry_candidates || [];
+  if (!deliveryEntries.length) {
+    box.innerHTML = '<p class="muted">该审计没有任何包节点，无法选择交付入口。</p>';
+    $("btn-delivery").disabled = true;
+    return;
+  }
+  box.innerHTML = '<div class="hint" style="margin-bottom:6px;">共 ' + deliveryEntries.length +
+    " 个包可作为交付入口，勾选一个或多个（数字为该入口沿依赖边可达的包数）：</div>" +
+    '<div class="dm-entry-list">' +
+    deliveryEntries.map((e) =>
+      '<label class="dm-entry">' +
+      '<input type="checkbox" class="delivery-check" value="' + esc(e.id) + '">' +
+      '<span class="mono"><b>' + esc(e.id) + "</b></span>" +
+      '<span class="badge ' + catClass(e.license_category) + '">' + esc(e.license_display) + "</span>" +
+      '<span class="pill">可达 ' + e.reachable + " 包</span>" +
+      "</label>"
+    ).join("") + "</div>";
+  $("btn-delivery").disabled = false;
+}
+
+function renderDeliveryPath(path, nodeMap) {
+  return '<div class="path">' + path.map((nid) => {
+    const node = nodeMap[nid];
+    const lic = node ? node.license_display : "";
+    return esc(nid) + (lic ? ' <span class="muted">[' + esc(lic) + "]</span>" : "");
+  }).join('<span class="arrow">→</span>') + "</div>";
+}
+
+function renderDeliveryResult(data) {
+  const s = data.summary;
+  const nodeMap = {};
+  (data.packages || []).forEach((p) => { nodeMap[p.id] = p; });
+
+  let html = '<div class="meta-line">审计 <span class="mono">#' + esc(data.audit.audit_id || "") + " · " +
+    esc(data.audit.manifest_name || "") + "</span> · 交付入口 " +
+    data.selected_entries.map((e) => '<span class="mono"><b>' + esc(e) + "</b></span>").join("、") + "</div>";
+  html += '<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:10px 0;">' +
+    (data.complete
+      ? '<span class="badge dm-complete" style="font-size:13px;padding:4px 12px;">✔ 清单完整：无未解析依赖、无未知许可证包</span>'
+      : '<span class="badge dm-incomplete" style="font-size:13px;padding:4px 12px;">⚠ 清单不完整：存在待补充项，不可视为完整交付清单</span>') +
+    '<span class="pill">确定性结果 · 闭包按审计节点声明顺序输出</span></div>';
+
+  html += '<div class="stats">' +
+    '<div class="stat"><div class="num">' + s.entries + "</div><div class='label'>交付入口</div></div>" +
+    '<div class="stat"><div class="num">' + s.packages + "</div><div class='label'>随入口交付的包（去重后）</div></div>" +
+    '<div class="stat"><div class="num">' + s.entry_packages + " / " + s.transitive_packages + '</div><div class="label">入口包 / 传递依赖包</div></div>' +
+    '<div class="stat"><div class="num">' + s.shared_packages + '</div><div class="label">多入口共享包（只列一次）</div></div>' +
+    '<div class="stat"><div class="num" style="color:var(--warn);">' + s.unknown_license_packages + '</div><div class="label">未知许可证包（待补充）</div></div>' +
+    '<div class="stat"><div class="num" style="color:var(--warn);">' + s.pending_unresolved + '</div><div class="label">入口可达未解析依赖（待补充）</div></div>' +
+    "</div>";
+
+  html += '<h3 style="margin:16px 0 8px;font-size:14px;">📦 交付包闭包 <span class="pill">' +
+    s.packages + " 个（共享包只列一次，保留各入口最短路径与归属）</span></h3>";
+  html += '<div style="overflow-x:auto;"><table><thead><tr>' +
+    "<th>包</th><th>许可证</th><th>角色</th><th>归属入口 / 各入口最短路径</th>" +
+    "</tr></thead><tbody>" +
+    data.packages.map((p) => {
+      const role = p.is_entry ? '<span class="badge info" style="background:var(--info-bg);color:var(--info);">交付入口</span>'
+                              : '<span class="pill">传递依赖</span>';
+      const unknown = p.license_known === false ? ' <span class="badge cat-unknown">未知许可证</span>' : "";
+      const attr = (p.attributed_via || []).map((a) =>
+        '<div class="dm-attribution"><span class="mono">入口 <b>' + esc(a.entry) + "</b>" +
+        ' <span class="pill">最短 ' + a.distance + " 跳</span></span>" +
+        renderDeliveryPath(a.path, nodeMap) + "</div>"
+      ).join("");
+      return "<tr><td class='mono'>" + esc(p.id) + "</td>" +
+        "<td><span class='badge " + catClass(p.license_category) + "'>" + esc(p.license_display) + "</span>" + unknown + "</td>" +
+        "<td>" + role + (p.entries.length > 1 ? ' <span class="pill">共享 ×' + p.entries.length + "</span>" : "") + "</td>" +
+        "<td>" + attr + "</td></tr>";
+    }).join("") +
+    "</tbody></table></div>";
+
+  // 待补充项
+  html += '<h3 style="margin:16px 0 8px;font-size:14px;">🧩 待补充：入口可达的未解析依赖 <span class="pill">' +
+    data.pending_unresolved.length + " 条</span></h3>";
+  if (data.pending_unresolved.length) {
+    html += data.pending_unresolved.map((u) =>
+      '<div class="ls-relation undetermined"><div class="head" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">' +
+      '<span class="badge ls-undetermined">未解析依赖</span> ' +
+      '<span class="mono"><b>' + esc(u.source) + "</b> → <b>" + esc(u.reference) + "</b></span>" +
+      '<span class="pill">归属入口：' + u.entries.map(esc).join("、") + "</span></div>" +
+      '<div class="reason" style="margin:6px 0;">' + esc(u.reason || "") + "</div>" +
+      (u.reachable_via || []).map((v) =>
+        '<div class="path-label"><span class="pill">经入口 ' + esc(v.entry) + "（到达源包的最短路径）</span></div>" +
+        renderDeliveryPath(v.path, nodeMap)
+      ).join("") + "</div>"
+    ).join("");
+  } else {
+    html += '<p class="muted">所选入口可达范围内没有未解析依赖引用。</p>';
+  }
+
+  html += '<h3 style="margin:16px 0 8px;font-size:14px;">❓ 待补充：闭包内未知许可证包 <span class="pill">' +
+    data.pending_unknown_license.length + " 个</span></h3>";
+  if (data.pending_unknown_license.length) {
+    html += '<div style="overflow-x:auto;"><table><thead><tr><th>包</th><th>声明的许可证原文</th><th>归属入口</th></tr></thead><tbody>' +
+      data.pending_unknown_license.map((p) =>
+        "<tr><td class='mono'>" + esc(p.id) + "</td>" +
+        "<td><span class='badge cat-unknown'>" + esc(p.license_raw || p.license_display || "UNLICENSED") + "</span></td>" +
+        "<td class='mono'>" + p.entries.map(esc).join("、") + "</td></tr>"
+      ).join("") + "</tbody></table></div>";
+  } else {
+    html += '<p class="muted">闭包内所有包的许可证均已识别。</p>';
+  }
+
+  html += '<div class="hint" style="margin-top:10px;">' + esc(data.method) +
+    " 本清单为只读计算结果，复用现有审计读取，不创建审计、不改写审计结果与复核标记。</div>";
+
+  const box = $("delivery-result");
+  box.innerHTML = html;
+  box.className = "";
+}
+
+function deliveryQuery(extra) {
+  const aid = $("delivery-audit").value;
+  const params = new URLSearchParams();
+  const checked = Array.from(document.querySelectorAll(".delivery-check:checked")).map((c) => c.value);
+  checked.forEach((id) => params.append("entry", id));
+  if (extra) params.append("download", "true");
+  return { aid: aid, url: "/api/audits/" + aid + "/delivery-manifest?" + params.toString(), checked: checked };
+}
+
+$("delivery-audit").addEventListener("change", loadDeliveryPreview);
+
+$("btn-delivery").addEventListener("click", async () => {
+  clearDeliveryAlert();
+  const q = deliveryQuery(false);
+  if (!q.aid) { showDeliveryAlert("请先选择一条审计记录。"); return; }
+  if (!q.checked.length) { showDeliveryAlert("请至少勾选一个交付入口包。"); return; }
+  $("btn-delivery").disabled = true;
+  try {
+    const resp = await fetch(q.url);
+    const data = await resp.json();
+    if (!resp.ok) {
+      showDeliveryAlert(typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail));
+      return;
+    }
+    deliveryReport = data;
+    $("btn-delivery-download").disabled = false;
+    renderDeliveryResult(data);
+  } catch (e) {
+    showDeliveryAlert("交付清单请求失败：" + e.message);
+  } finally {
+    $("btn-delivery").disabled = false;
+  }
+});
+
+$("btn-delivery-download").addEventListener("click", () => {
+  clearDeliveryAlert();
+  const q = deliveryQuery(true);
+  if (!q.aid) { showDeliveryAlert("请先选择一条审计记录。"); return; }
+  if (!q.checked.length) { showDeliveryAlert("请先生成交付清单（勾选至少一个交付入口）。"); return; }
+  // 下载与页面展示使用同一份入口选择（服务端按相同确定性算法重算）
+  window.location.href = q.url;
 });
 
 // 自动载入示例，便于首次访问

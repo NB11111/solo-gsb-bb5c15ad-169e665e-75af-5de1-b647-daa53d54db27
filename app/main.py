@@ -1,4 +1,8 @@
-"""FastAPI 入口：JSON API + 简洁网页。"""
+"""FastAPI 入口：JSON API + 简洁网页。
+
+包含审计提交/读取、两次对比、复核标记、退役/换证/补边预演、最少断边分析、
+全图许可证选定、交付清单与审计复现包等路由（预演/分析/清单均为纯只读）。
+"""
 
 from __future__ import annotations
 
@@ -16,6 +20,7 @@ from . import (
     analyzer,
     compare as compare_mod,
     database,
+    delivery as delivery_mod,
     edgecut as edgecut_mod,
     edgefix as edgefix_mod,
     graphselect as graphselect_mod,
@@ -262,6 +267,47 @@ def graph_license_selection(audit_id: int) -> Dict[str, Any]:
             detail="审计记录不存在：%s。全图许可证选定为只读操作，不会创建新审计。" % audit_id,
         )
     return graphselect_mod.select_graph_licenses(result)
+
+
+@app.get(
+    "/api/audits/{audit_id}/delivery-manifest",
+    tags=["audit"],
+    summary="交付清单（只读）：选一个或多个交付入口包，沿 使用方→被依赖方 边计算随入口交付的包闭包",
+)
+def delivery_manifest(
+    audit_id: int,
+    entry: Optional[List[str]] = Query(
+        None,
+        description="交付入口包 id（name@version；包名唯一时也可只给包名），可重复或逗号分隔；留空则返回可选入口列表",
+    ),
+    download: bool = Query(False, description="是否以附件（JSON 文件下载）方式返回；选择了入口时才允许下载"),
+) -> Any:
+    result = database.get_audit(audit_id)
+    if result is None:
+        raise HTTPException(
+            status_code=404,
+            detail="审计记录不存在：%s。交付清单为只读操作，不会创建新审计。" % audit_id,
+        )
+    entry_ids: List[str] = []
+    for item in entry or []:
+        entry_ids.extend(part.strip() for part in str(item).split(",") if part.strip())
+    try:
+        report = delivery_mod.build_manifest(result, entry_ids)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    if download:
+        if not report.get("generated"):
+            raise HTTPException(
+                status_code=422,
+                detail="请先选择至少一个交付入口包（entry=name@version，可重复）再下载交付清单 JSON。",
+            )
+        slug = "-".join(str(e).replace("@", "-").replace("/", "_") for e in report["selected_entries"])
+        filename = "audit-%s-delivery-%s.json" % (audit_id, slug[:120])
+        return JSONResponse(
+            report,
+            headers={"Content-Disposition": 'attachment; filename="%s"' % filename},
+        )
+    return report
 
 
 @app.get("/api/audits/{audit_id}", tags=["audit"], summary="获取某次审计结果（支持按包筛选/导出）")
