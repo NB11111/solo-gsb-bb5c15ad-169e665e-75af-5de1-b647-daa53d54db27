@@ -46,7 +46,7 @@ manifest（或直接上传 **CycloneDX JSON** SBOM），系统会：
     展示新增及最短路径变化的冲突（附两侧路径）、剩余未解析项与冲突数净变化；
     引用或目标无效、补成自依赖或重复边返回明确错误（422）；预演为纯只读操作，
     **不创建审计、不改动复核标记**，原生 manifest 与 CycloneDX 审计均可使用。
-12. **最少断边分析** —— 在网页第 8 节选定一条已保存审计中的冲突或告警后（或调用
+12. **最少断边分析** —— 在网页第 9 节选定一条已保存审计中的冲突或告警后（或调用
     `GET /api/audits/{id}/edgecut/{conflict_id}`），沿审计保存的现有
     **使用方 → 被依赖方** 图，计算要让该条冲突的祖先包无法再到达被依赖包所需删除的
     **最少依赖边**（有向图 s-t 最小边割：单位容量 Edmonds-Karp 最大流 = 最小割）：
@@ -81,7 +81,16 @@ manifest（或直接上传 **CycloneDX JSON** SBOM），系统会：
     服务端按**稳定键序列化**重算两处摘要，再用包内 manifest 调用现有分析器，
     剔除审计 ID、时间等运行元数据后逐项比对节点、依赖边、冲突严重程度与最短路径，
     并指出**首个不一致字段**；只有摘要与复算结果**都一致**才判通过。
-    核验为纯只读操作（不创建审计、不改动复核标记），格式错误返回明确的 422 提示。
+    核验为纯只读操作（不创建审计、不改动复核标记），格式错误返回明确的 422 提示；
+15. **交付清单（入口包闭包）** —— 在网页第 7 节选择一条已保存审计并勾选一个或多个
+    **交付入口包**（或调用 `GET /api/audits/{id}/delivery?entry=…`），服务端沿
+    使用方 → 被依赖方 的边计算随入口交付的**包闭包**（BFS，依赖环安全终止）：
+    同一包被多个入口共享时清单**只列一次**，但保留**每个入口到它的最短路径**与
+    **入口归属**；清单按审计节点声明顺序输出，**顺序固定**、可复现。入口可达的
+    **未解析依赖**与闭包内的**未知许可证包**单列为「待补充项」并把清单标记为不完整，
+    避免被误认为完整交付物。网页可勾选生成并一键**下载清单 JSON**；
+    计算为纯只读操作，**不创建审计、不改动复核标记**，原生 manifest 与
+    CycloneDX 审计均可使用。
 
 ## 多许可证候选（OR）组合判定
 
@@ -141,7 +150,7 @@ docker compose up --build          # 前台启动（加 -d 可后台运行）
 
 | 地址 | 说明 |
 | --- | --- |
-| <http://localhost:8000/> | 网页界面（已自动载入示例 manifest，可一键切换 CycloneDX 示例；第 2 节可对比两次历史审计、下载/上传核验审计复现包，第 3 节可做根包退役预演，第 4 节可做单包许可证替换预演，第 5 节可做未解析依赖补边预演，第 6 节可做全图许可证选定，第 8 节可对单条冲突做最少断边分析） |
+| <http://localhost:8000/> | 网页界面（已自动载入示例 manifest，可一键切换 CycloneDX 示例；第 2 节可对比两次历史审计、下载/上传核验审计复现包，第 3 节可做根包退役预演，第 4 节可做单包许可证替换预演，第 5 节可做未解析依赖补边预演，第 6 节可做全图许可证选定，第 7 节可生成并下载交付清单，第 9 节可对单条冲突做最少断边分析） |
 | <http://localhost:8000/docs> | Swagger 风格交互式 JSON API 文档 |
 | <http://localhost:8000/redoc> | ReDoc API 文档 |
 | <http://localhost:8000/api/matrix> | 许可证兼容矩阵（机器可读） |
@@ -297,6 +306,7 @@ $ curl -s -X POST http://localhost:8000/api/audit -H "Content-Type: application/
 | GET | `/api/audits/{id}/edgefix?source=a@1&reference=x@2&target=x@1` | **未解析依赖补边预演**（只读；不带参数返回源包仍存在的未解析引用与目标包列表） |
 | GET | `/api/audits/{id}/edgecut/{conflict_id}` | **最少断边分析**（只读；返回让祖先包无法再到达被依赖包的确定性最少断边集合） |
 | GET | `/api/audits/{id}/license-select` | **全图许可证选定**（只读；每包从现有 OR/并列候选固定选一个，按全部可达关系求全图一致选择） |
+| GET | `/api/audits/{id}/delivery?entry=a@1&entry=b@2` | **交付清单**（只读；入口包闭包，共享包保留各入口最短路径与归属，未解析依赖/未知许可证单列待补充；`&download=true` 下载 JSON） |
 | GET | `/api/audits/{id}/repro` | **导出审计复现包**（原始 manifest + 保存结果 + 两者 SHA-256 摘要，可离线转交） |
 | POST | `/api/repro/verify` | **核验复现包**（JSON 请求体，只读：重算摘要 + 分析器复算逐项比对） |
 | POST | `/api/repro/verify/upload` | **上传复现包文件核验**（multipart，只读，不创建审计） |
@@ -409,7 +419,7 @@ curl http://localhost:8000/api/reviews/1                          # 单条记录
 curl -X POST http://localhost:8000/api/reviews/1/revoke           # 撤销（保留记录，条目回到待复核）
 ```
 
-网页端在第 8 节每条冲突卡片上直接展示「待复核 / 已复核」徽标：待复核条目可填写
+网页端在第 9 节每条冲突卡片上直接展示「待复核 / 已复核」徽标：待复核条目可填写
 复核备注与失效时间后一键打标，已复核条目显示备注、失效时间并提供「撤销标记」按钮，
 操作后列表自动刷新。删除审计记录不会删除复核标记（标记按指纹跨审计生效）。
 
@@ -643,7 +653,7 @@ HTTP/1.1 404 Not Found
 {"detail":"审计 #1 中不存在冲突/告警条目：C999。"}
 ```
 
-网页端在第 8 节每条冲突/告警卡片上点击「✂ 最少断边分析」即可：
+网页端在第 9 节每条冲突/告警卡片上点击「✂ 最少断边分析」即可：
 页面展示原最短路径（落在上面的建议断边以红色波浪线标出）、建议删除边清单
 （区分原最短路径上的边与并行/汇合路径上的边）、边不相交见证路径（折叠区）
 以及断边后是否仍可达的徽标与残留路径；可对任意条目反复分析，
@@ -732,6 +742,89 @@ $ curl -s http://localhost:8000/api/audits/999/license-select
 审计不存在返回 `404`。分析为纯只读操作，不创建审计、不改动原审计结果
 与复核标记；原生 manifest 与 CycloneDX 审计均可直接使用。网页端在第 6 节
 选择审计后点击「求全图一致选择」即可查看结论、每包选择与三类关系清单。
+
+### 交付清单接口（入口包闭包）
+
+对一条**已保存审计**，勾选一个或多个**交付入口包**（任意已声明的包节点，
+不限于根包），服务端沿 使用方 → 被依赖方 的依赖边从每个入口做 BFS，
+把随入口交付的**包闭包**整理成一份交付清单：
+
+```bash
+# 不带参数：仅返回该审计的可选入口包列表（generated=false，含每个包的可达包数量）
+curl http://localhost:8000/api/audits/1/delivery
+
+# 生成清单：一个或多个入口包（重复 entry 参数，也支持逗号分隔）
+curl "http://localhost:8000/api/audits/1/delivery?entry=web-app@2.1.0&entry=admin-cli@1.4.0"
+
+# 下载清单 JSON 文件（audit-1-delivery.json）
+curl -OJ "http://localhost:8000/api/audits/1/delivery?entry=web-app@2.1.0&download=true"
+```
+
+清单语义与结构：
+
+- **闭包与顺序** —— `items` 为全部入口可达的包（含入口自身），按审计节点
+  声明顺序排列，**输出顺序固定**；BFS 每个节点只访问一次，**依赖环安全终止**；
+- **共享包只列一次** —— 同一包被多个入口共享时只占一行，`shared=true`，
+  `reached_by` 给出**入口归属**（按入口在审计中的声明顺序，与请求顺序无关），
+  `paths` 保留**每个入口到它的最短路径**（BFS 首次到达即最短，入口到自身为
+  0 跳）；
+- **待补充项** —— `pending.unresolved_dependencies` 单列**入口可达的未解析
+  依赖**（源包在闭包内；不可达入口的未解析项不计入），
+  `pending.unknown_license_packages` 单列闭包内**许可证未识别**的包；
+  两者任一非空时 `summary.complete` / `pending.complete` 为 `false`，
+  避免清单被误认为完整交付物；
+- `summary` —— 入口数、清单包数（含入口包数）、共享包数与待补充项计数。
+
+```json
+{
+  "kind": "delivery-manifest",
+  "read_only": true,
+  "deterministic": true,
+  "generated": true,
+  "entries": [ {"id": "web-app@2.1.0", "license_display": "AGPL-3.0", "reachable": 14, "…": "…"} ],
+  "summary": {"entries": 2, "packages": 16, "entry_packages": 2, "shared_packages": 1,
+              "pending_unresolved": 1, "pending_unknown_licenses": 1,
+              "pending_total": 2, "complete": false},
+  "items": [
+    {"id": "crypto-lib@1.1.0", "license_display": "Apache-2.0", "entry": false, "shared": true,
+     "reached_by": ["web-app@2.1.0", "admin-cli@1.4.0"],
+     "paths": [
+       {"entry": "web-app@2.1.0", "distance": 2,
+        "path": ["web-app@2.1.0", "billing-core@1.2.0", "crypto-lib@1.1.0"]},
+       {"entry": "admin-cli@1.4.0", "distance": 1,
+        "path": ["admin-cli@1.4.0", "crypto-lib@1.1.0"]}
+     ]}
+  ],
+  "pending": {
+    "complete": false,
+    "note": "清单不完整：存在 1 条入口可达的未解析依赖、1 个未知许可证包，补齐前请勿将本清单视为完整交付物。",
+    "unresolved_dependencies": [
+      {"source": "web-app@2.1.0", "reference": "cache-redis", "reason": "依赖包未在 packages 中声明"}
+    ],
+    "unknown_license_packages": [
+      {"id": "font-pack@2.0.0", "license_display": "OFL-1.1", "reached_by": ["web-app@2.1.0"], "…": "…"}
+    ]
+  }
+}
+```
+
+清单是**只读**操作，不会创建审计或改动复核标记；原生 manifest 与 CycloneDX
+审计结果均可直接使用。错误情形返回明确信息：
+
+```bash
+$ curl -i "http://localhost:8000/api/audits/999/delivery?entry=app@1"
+HTTP/1.1 404 Not Found
+{"detail":"审计记录不存在：999。交付清单为只读操作，不会创建新审计。"}
+
+$ curl -i "http://localhost:8000/api/audits/1/delivery?entry=ghost@9"
+HTTP/1.1 422 Unprocessable Entity
+{"detail":"审计中不存在以下包：ghost@9。交付清单只能选择该审计已声明的包节点作为入口。"}
+```
+
+重复选择同一入口（`422`「重复选择交付入口包」）同样返回明确错误。网页端在
+第 7 节选择审计后勾选一个或多个入口包，点「生成清单」即可查看清单（共享包
+标注各入口最短路径）与待补充项，点「⬇ 下载清单 JSON」导出当前选择对应的
+清单文件，可反复调整勾选重新生成。
 
 ### 审计复现包接口（导出 / 离线核验）
 
@@ -902,6 +995,7 @@ CycloneDX 导入的审计结果结构相同，另带 `"source_format": "cycloned
 │   ├── edgefix.py     # 未解析依赖补边预演：补一条边并移除所选未解析项后重算并配对（纯只读）
 │   ├── edgecut.py     # 最少断边分析：Edmonds-Karp 最大流/最小割，确定性断边集合（纯只读）
 │   ├── graphselect.py # 全图许可证选定：每包从 OR/并列候选固定选一，全可达关系回溯求一致选择（纯只读）
+│   ├── delivery.py    # 交付清单：入口包闭包（BFS 环安全、顺序固定），共享包保留各入口最短路径与归属，待补充项单列（纯只读）
 │   ├── repro.py       # 审计复现包：稳定序列化摘要、导出打包与离线核验（纯只读）
 │   ├── reviews.py     # 复核标记：指纹计算、失效时间规范化、审计结果附着
 │   ├── licenses.py    # 许可证别名规范化与兼容矩阵
@@ -909,7 +1003,7 @@ CycloneDX 导入的审计结果结构相同，另带 `"source_format": "cycloned
 ├── static/
 │   ├── index.html     # 单文件网页（无外部 CDN 依赖）
 │   └── examples/      # sample-manifest.json 与 sample-cyclonedx.json 两个内置示例
-├── tests/             # 轻量自测：python -m tests.test_analyzer / test_compare / test_reviews / test_cyclonedx / test_multi_license / test_retire / test_relicense / test_edgefix / test_edgecut / test_graphselect / test_repro
+├── tests/             # 轻量自测：python -m tests.test_analyzer / test_compare / test_reviews / test_cyclonedx / test_multi_license / test_retire / test_relicense / test_edgefix / test_edgecut / test_graphselect / test_repro / test_delivery
 ├── Dockerfile
 ├── docker-compose.yml
 └── requirements.txt

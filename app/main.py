@@ -16,6 +16,7 @@ from . import (
     analyzer,
     compare as compare_mod,
     database,
+    delivery as delivery_mod,
     edgecut as edgecut_mod,
     edgefix as edgefix_mod,
     graphselect as graphselect_mod,
@@ -262,6 +263,42 @@ def graph_license_selection(audit_id: int) -> Dict[str, Any]:
             detail="审计记录不存在：%s。全图许可证选定为只读操作，不会创建新审计。" % audit_id,
         )
     return graphselect_mod.select_graph_licenses(result)
+
+
+@app.get(
+    "/api/audits/{audit_id}/delivery",
+    tags=["audit"],
+    summary="交付清单（只读）：从入口包沿依赖边计算交付闭包，共享包保留各入口最短路径",
+)
+def delivery_manifest(
+    audit_id: int,
+    entry: Optional[List[str]] = Query(
+        None,
+        description="交付入口包 id（name@version），可重复或逗号分隔；留空则返回可选入口包列表",
+    ),
+    download: bool = False,
+) -> Any:
+    result = database.get_audit(audit_id)
+    if result is None:
+        raise HTTPException(
+            status_code=404,
+            detail="审计记录不存在：%s。交付清单为只读操作，不会创建新审计。" % audit_id,
+        )
+    entry_ids: List[str] = []
+    for item in entry or []:
+        entry_ids.extend(part.strip() for part in str(item).split(",") if part.strip())
+    try:
+        manifest = delivery_mod.build_delivery(result, entry_ids)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    if download and entry_ids:
+        return JSONResponse(
+            manifest,
+            headers={
+                "Content-Disposition": 'attachment; filename="audit-%d-delivery.json"' % audit_id
+            },
+        )
+    return manifest
 
 
 @app.get("/api/audits/{audit_id}", tags=["audit"], summary="获取某次审计结果（支持按包筛选/导出）")
